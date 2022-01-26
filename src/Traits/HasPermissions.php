@@ -71,7 +71,9 @@ trait HasPermissions
 
         $this->permissions()->saveMany($permissions);
 
-        $this->forgetCachedPermissions();
+        if (is_a($this, get_class(app(PermissionRegistrar::class)->getRoleClass()))) {
+            $this->forgetCachedPermissions();
+        }
 
         return $this;
     }
@@ -110,7 +112,9 @@ trait HasPermissions
                 return $permission;
             });
 
-        $this->forgetCachedPermissions();
+        if (is_a($this, get_class(app(PermissionRegistrar::class)->getRoleClass()))) {
+            $this->forgetCachedPermissions();
+        }
 
         return $this;
     }
