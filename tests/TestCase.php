@@ -52,14 +52,6 @@ abstract class TestCase extends Orchestra
 
         $this->reloadPermissions();
 
-        $this->testUser = User::first();
-        $this->testUserRole = \app(\config('permission.models.role'))->where('name', 'testRole')->first();
-        $this->testUserPermission = \app(\config('permission.models.permission'))->where('name', 'edit-articles')->first();
-
-        $this->testAdmin = Admin::first();
-        $this->testAdminRole = \app(\config('permission.models.role'))->where('name', 'testAdminRole')->first();
-        $this->testAdminPermission = \app(\config('permission.models.permission'))->where('name', 'admin-permission')->first();
-
         $this->clearLogTestHandler();
 
         $this->helpers = new Helpers();
@@ -87,7 +79,7 @@ abstract class TestCase extends Orchestra
     {
         $app['config']->set('database.default', 'mongodb');
         $app['config']->set('database.connections.mongodb', [
-            'host' => 'localhost',
+            'host' => 'db',
             'port' => '27017',
             'driver' => 'mongodb',
             'database' => 'laravel_permission_mongodb_test',
@@ -116,27 +108,25 @@ abstract class TestCase extends Orchestra
         include_once __DIR__.'/../database/migrations/create_permission_collections.php.stub';
         (new \CreatePermissionCollections())->up();
 
-        User::create(['email' => 'test@user.com']);
-        Admin::create(['email' => 'admin@user.com']);
-        $app[Role::class]->create(['name' => 'testRole']);
+        $this->testUser = User::create(['email' => 'test@user.com']);
+        $this->testAdmin = Admin::create(['email' => 'admin@user.com']);
+        $this->testUserRole = $app[Role::class]->create(['name' => 'testRole']);
         $app[Role::class]->create(['name' => 'testRole2']);
-        $app[Role::class]->create(['name' => 'testAdminRole', 'guard_name' => 'admin']);
-        $app[Permission::class]->create(['name' => 'edit-articles']);
+        $this->testAdminRole = $app[Role::class]->create(['name' => 'testAdminRole', 'guard_name' => 'admin']);
+        $this->testUserPermission = $app[Permission::class]->create(['name' => 'edit-articles']);
         $app[Permission::class]->create(['name' => 'edit-news']);
+        $app[Permission::class]->create(['name' => 'edit-blog']);
         $app[Permission::class]->create(['name' => 'edit-categories']);
-        $app[Permission::class]->create(['name' => 'admin-permission', 'guard_name' => 'admin']);
+        $this->testAdminPermission = $app[Permission::class]->create(['name' => 'admin-permission', 'guard_name' => 'admin']);
+        $app[Permission::class]->create(['name' => 'Edit News']);
     }
 
     /**
      * Reload the permissions.
-     *
-     * @return bool
      */
     protected function reloadPermissions()
     {
         \app(PermissionRegistrar::class)->forgetCachedPermissions();
-
-        return \app(PermissionRegistrar::class)->registerPermissions();
     }
 
     /**

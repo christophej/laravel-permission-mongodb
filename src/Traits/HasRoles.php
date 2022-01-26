@@ -83,7 +83,9 @@ trait HasRoles
 
         $this->roles()->saveMany($roles);
 
-        $this->forgetCachedPermissions();
+        if (is_a($this, get_class($this->getPermissionClass()))) {
+            $this->forgetCachedPermissions();
+        }
 
         return $roles;
     }
@@ -106,7 +108,9 @@ trait HasRoles
                 return $role;
             });
 
-        $this->forgetCachedPermissions();
+        if (is_a($this, get_class($this->getPermissionClass()))) {
+            $this->forgetCachedPermissions();
+        }
 
         return $roles;
     }

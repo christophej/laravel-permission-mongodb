@@ -7,7 +7,7 @@ use Jenssegers\Mongodb\Eloquent\Builder;
 use Jenssegers\Mongodb\Eloquent\Model;
 use Jenssegers\Mongodb\Relations\BelongsToMany;
 use Maklad\Permission\Contracts\PermissionInterface as Permission;
-use Maklad\Permission\Exceptions\GuardDoesNotMatch;
+use Maklad\Permission\Exceptions\{GuardDoesNotMatch, PermissionDoesNotExist};
 use Maklad\Permission\Guard;
 use Maklad\Permission\Helpers;
 use Maklad\Permission\Models\Role;
@@ -71,7 +71,9 @@ trait HasPermissions
 
         $this->permissions()->saveMany($permissions);
 
-        $this->forgetCachedPermissions();
+        if (is_a($this, get_class(app(PermissionRegistrar::class)->getRoleClass()))) {
+            $this->forgetCachedPermissions();
+        }
 
         return $this;
     }
@@ -110,7 +112,9 @@ trait HasPermissions
                 return $permission;
             });
 
-        $this->forgetCachedPermissions();
+        if (is_a($this, get_class(app(PermissionRegistrar::class)->getRoleClass()))) {
+            $this->forgetCachedPermissions();
+        }
 
         return $this;
     }
@@ -250,6 +254,23 @@ trait HasPermissions
         return $this->hasDirectPermission($permission) || $this->hasPermissionViaRole($permission);
     }
 
+    /**
+     * An alias to hasPermissionTo(), but avoids throwing an exception.
+     *
+     * @param string|int|Permission $permission
+     * @param string|null $guardName
+     *
+     * @return bool
+     */
+    public function checkPermissionTo($permission, $guardName = null): bool
+    {
+        try {
+            return $this->hasPermissionTo($permission, $guardName);
+        } catch (PermissionDoesNotExist $e) {
+            return false;
+        }
+    }
+    
     /**
      * Determine if the model has any of the given permissions.
      *

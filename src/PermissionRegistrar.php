@@ -2,26 +2,22 @@
 
 namespace Maklad\Permission;
 
+use Illuminate\Cache\CacheManager;
 use Illuminate\Contracts\Auth\Access\Authorizable;
 use Illuminate\Contracts\Auth\Access\Gate;
 use Illuminate\Contracts\Cache\Repository;
-use Illuminate\Support\Collection;
+use Illuminate\Contracts\Cache\Store;
+use Illuminate\Database\Eloquent\Collection;
 use Maklad\Permission\Contracts\PermissionInterface as Permission;
+use Maklad\Permission\Contracts\RoleInterface as Role;
 
-/**
- * Class PermissionRegistrar
- * @package Maklad\Permission
- */
 class PermissionRegistrar
 {
-    /** @var \Illuminate\Contracts\Auth\Access\Gate */
-    protected $gate;
-
     /** @var \Illuminate\Contracts\Cache\Repository */
     protected $cache;
 
-    /** @var string */
-    protected $cacheKey = 'maklad.permission.cache';
+    /** @var \Illuminate\Cache\CacheManager */
+    protected $cacheManager;
 
     /** @var string */
     protected $permissionClass;
@@ -29,72 +25,249 @@ class PermissionRegistrar
     /** @var string */
     protected $roleClass;
 
+    /** @var \Illuminate\Database\Eloquent\Collection */
+    protected $permissions;
+
+    /** @var string */
+    public static $pivotRole;
+
+    /** @var string */
+    public static $pivotPermission;
+
+    /** @var \DateInterval|int */
+    public static $cacheExpirationTime;
+
+    /** @var bool */
+    public static $teams;
+
+    /** @var string */
+    public static $teamsKey;
+
+    /** @var int|string */
+    protected $teamId = null;
+
+    /** @var string */
+    public static $cacheKey;
+
+    /** @var array */
+    private $cachedRoles = [];
+
     /**
      * PermissionRegistrar constructor.
-     * @param Gate $gate
-     * @param Repository $cache
+     *
+     * @param \Illuminate\Cache\CacheManager $cacheManager
      */
-    public function __construct(Gate $gate, Repository $cache)
+    public function __construct(CacheManager $cacheManager)
     {
-        $this->gate = $gate;
-        $this->cache = $cache;
         $this->permissionClass = config('permission.models.permission');
         $this->roleClass = config('permission.models.role');
+
+        $this->cacheManager = $cacheManager;
+        $this->initializeCache();
+    }
+
+    public function initializeCache()
+    {
+        self::$cacheExpirationTime = config('permission.cache.expiration_time') ?: \DateInterval::createFromDateString('24 hours');
+
+        self::$teams = config('permission.teams', false);
+        self::$teamsKey = config('permission.column_names.team_foreign_key');
+
+        self::$cacheKey = config('permission.cache.key');
+
+        self::$pivotRole = config('permission.column_names.role_pivot_key') ?: 'role_id';
+        self::$pivotPermission = config('permission.column_names.permission_pivot_key') ?: 'permission_id';
+
+        $this->cache = $this->getCacheStoreFromConfig();
+    }
+
+    protected function getCacheStoreFromConfig(): Repository
+    {
+        // the 'default' fallback here is from the permission.php config file,
+        // where 'default' means to use config(cache.default)
+        $cacheDriver = config('permission.cache.store', 'default');
+
+        // when 'default' is specified, no action is required since we already have the default instance
+        if ($cacheDriver === 'default') {
+            return $this->cacheManager->store();
+        }
+
+        // if an undefined cache store is specified, fallback to 'array' which is Laravel's closest equiv to 'none'
+        if (! \array_key_exists($cacheDriver, config('cache.stores'))) {
+            $cacheDriver = 'array';
+        }
+
+        return $this->cacheManager->store($cacheDriver);
     }
 
     /**
-     * Register Permissions
+     * Set the team id for teams/groups support, this id is used when querying permissions/roles
+     *
+     * @param int|string|\Illuminate\Database\Eloquent\Model $id
+     */
+    public function setPermissionsTeamId($id)
+    {
+        if ($id instanceof \Illuminate\Database\Eloquent\Model) {
+            $id = $id->getKey();
+        }
+        $this->teamId = $id;
+    }
+
+    /**
+     *
+     * @return int|string
+     */
+    public function getPermissionsTeamId()
+    {
+        return $this->teamId;
+    }
+
+    /**
+     * Register the permission check method on the gate.
+     * We resolve the Gate fresh here, for benefit of long-running instances.
      *
      * @return bool
      */
     public function registerPermissions(): bool
     {
-        $this->getPermissions()->map(function (Permission $permission) {
-            $this->gate->define($permission->name, function (Authorizable $user) use ($permission) {
-                return $user->hasPermissionTo($permission) ?: null;
-            });
+        app(Gate::class)->before(function (Authorizable $user, string $ability) {
+            if (method_exists($user, 'checkPermissionTo')) {
+                return $user->checkPermissionTo($ability) ?: null;
+            }
         });
 
         return true;
     }
 
     /**
-     * Forget cached permission
+     * Flush the cache.
      */
     public function forgetCachedPermissions()
     {
-        $this->cache->forget($this->cacheKey);
+        $this->permissions = null;
+
+        return $this->cache->forget(self::$cacheKey);
     }
 
     /**
-     * Get Permissions
-     *
-     * @return Collection
+     * Clear class permissions.
+     * This is only intended to be called by the PermissionServiceProvider on boot,
+     * so that long-running instances like Swoole don't keep old data in memory.
      */
-    public function getPermissions(): Collection
+    public function clearClassPermissions()
     {
-        return $this->cache->remember($this->cacheKey, config('permission.cache_expiration_time'), function () {
+        $this->permissions = null;
+    }
+
+    /**
+     * Load permissions from cache
+     * This get cache and turns array into \Illuminate\Database\Eloquent\Collection
+     */
+    private function loadPermissions()
+    {
+        if ($this->permissions) {
+            return;
+        }
+
+        $this->permissions = $this->cache->remember(self::$cacheKey, self::$cacheExpirationTime, function () {
             return $this->getPermissionClass()->with('roles')->get();
         });
     }
 
     /**
-     * Get Permission class
+     * Get the permissions based on the passed params.
      *
-     * @return \Illuminate\Foundation\Application|mixed
+     * @param array $params
+     * @param bool $onlyOne
+     *
+     * @return \Illuminate\Database\Eloquent\Collection
      */
-    public function getPermissionClass()
+    public function getPermissions(array $params = [], bool $onlyOne = false): Collection
+    {
+        $this->loadPermissions();
+
+        $method = $onlyOne ? 'first' : 'filter';
+
+        $permissions = $this->permissions->$method(static function ($permission) use ($params) {
+            foreach ($params as $attr => $value) {
+                if ($permission->getAttribute($attr) != $value) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
+
+        if ($onlyOne) {
+            $permissions = new Collection($permissions ? [$permissions] : []);
+        }
+
+        return $permissions;
+    }
+
+    /**
+     * Get an instance of the permission class.
+     *
+     * @return Permission
+     */
+    public function getPermissionClass(): Permission
     {
         return app($this->permissionClass);
     }
 
+    public function setPermissionClass($permissionClass)
+    {
+        $this->permissionClass = $permissionClass;
+        config()->set('permission.models.permission', $permissionClass);
+        app()->bind(Permission::class, $permissionClass);
+
+        return $this;
+    }
+
     /**
-     * Get Role class
+     * Get an instance of the role class.
      *
-     * @return \Illuminate\Foundation\Application|mixed
+     * @return Role
      */
-    public function getRoleClass()
+    public function getRoleClass(): Role
     {
         return app($this->roleClass);
+    }
+
+    public function setRoleClass($roleClass)
+    {
+        $this->roleClass = $roleClass;
+        config()->set('permission.models.role',  $roleClass);
+        app()->bind(Role::class, $roleClass);
+
+        return $this;
+    }
+
+    public function getCacheRepository(): Repository
+    {
+        return $this->cache;
+    }
+
+    public function getCacheStore(): Store
+    {
+        return $this->cache->getStore();
+    }
+
+    private function getHydratedRole(array $item)
+    {
+        $roleId = $item['i'] ?? $item['id'];
+
+        if (isset($this->cachedRoles[$roleId])) {
+            return $this->cachedRoles[$roleId];
+        }
+
+        $roleClass = $this->getRoleClass();
+        $roleInstance = new $roleClass();
+
+        return $this->cachedRoles[$roleId] = $roleInstance->newFromBuilder([
+            'id' => $roleId,
+            'name' => $item['n'] ?? $item['name'],
+            'guard_name' => $item['g'] ?? $item['guard_name'],
+        ]);
     }
 }
